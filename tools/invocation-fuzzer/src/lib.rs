@@ -575,7 +575,114 @@ pub fn load_campaign(path: &Path) -> Result<Campaign> {
     Ok(campaign)
 }
 
-pub fn load_corpus(directory: &Path) -> Result<Vec<Campaign>> {
+/// Provenance metadata for a single committed corpus seed.
+///
+/// Every seed under `tools/invocation-fuzzer/corpus` must carry a co-located
+/// provenance note so that its purpose is traceable to a real scenario rather
+/// than an arbitrary or forgotten test artifact (see issue #1460). The note is
+/// stored in a sidecar file named `<seed>.json.provenance` next to the seed and
+/// uses a deliberately lightweight, line-oriented format:
+///
+/// ```text
+/// # Lines starting with '#' are comments and are ignored.
+/// scenario: <short identifier for the scenario or historical finding>
+/// reason: <why this seed exists / what it reproduces>
+/// issue: <optional tracking reference, e.g. #1460>
+/// ```
+///
+/// The `scenario` and `reason` fields are required; `issue` is optional. This
+/// format is intentionally trivial to parse so the CI provenance check can
+/// enforce it without pulling in extra dependencies.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeedProvenance {
+    pub scenario: String,
+    pub reason: String,
+    pub issue: Option<String>,
+}
+
+/// A corpus seed together with its provenance note.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CorpusEntry {
+    pub path: PathBuf,
+    pub campaign: Campaign,
+    pub provenance: SeedProvenance,
+}
+
+/// Suffix appended to a seed's file name to locate its provenance sidecar.
+pub const PROVENANCE_SUFFIX: &str = ".provenance";
+
+/// Returns the sidecar path that holds the provenance note for `seed_path`.
+pub fn provenance_path(seed_path: &Path) -> PathBuf {
+    let mut name = seed_path.as_os_str().to_owned();
+    name.push(PROVENANCE_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// Parses a provenance sidecar's contents.
+///
+/// Blank lines and lines beginning with `#` are ignored. Every other line must
+/// be of the form `key: value`. `scenario` and `reason` are required and must be
+/// non-empty; `issue` is optional. Unknown keys are rejected so typos surface
+/// during review instead of silently dropping provenance.
+pub fn parse_provenance(contents: &str) -> Result<SeedProvenance> {
+    let mut scenario: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut issue: Option<String> = None;
+
+    for (line_number, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line.split_once(':').ok_or_else(|| {
+            anyhow!("provenance line {} is not `key: value`: {line:?}", line_number + 1)
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if value.is_empty() {
+            bail!("provenance line {} has an empty value for `{key}`", line_number + 1);
+        }
+        match key {
+            "scenario" => set_once(&mut scenario, value, key, line_number)?,
+            "reason" => set_once(&mut reason, value, key, line_number)?,
+            "issue" => set_once(&mut issue, value, key, line_number)?,
+            other => bail!("provenance line {} has unknown key `{other}`", line_number + 1),
+        }
+    }
+
+    let scenario = scenario.ok_or_else(|| anyhow!("provenance is missing required `scenario`"))?;
+    let reason = reason.ok_or_else(|| anyhow!("provenance is missing required `reason`"))?;
+    Ok(SeedProvenance { scenario, reason, issue })
+}
+
+fn set_once(
+    slot: &mut Option<String>,
+    value: &str,
+    key: &str,
+    line_number: usize,
+) -> Result<()> {
+    if slot.is_some() {
+        bail!("provenance line {} repeats key `{key}`", line_number + 1);
+    }
+    *slot = Some(value.to_owned());
+    Ok(())
+}
+
+/// Loads the provenance note for `seed_path`, failing if the sidecar is absent
+/// or malformed.
+pub fn load_provenance(seed_path: &Path) -> Result<SeedProvenance> {
+    let sidecar = provenance_path(seed_path);
+    let contents = fs::read_to_string(&sidecar)
+        .with_context(|| format!("reading provenance note {}", sidecar.display()))?;
+    parse_provenance(&contents)
+        .with_context(|| format!("parsing provenance note {}", sidecar.display()))
+}
+
+/// Loads every committed seed in `directory` together with its provenance note.
+///
+/// Seeds without a co-located provenance sidecar are rejected so the corpus
+/// cannot silently accumulate undocumented entries.
+pub fn load_corpus_entries(directory: &Path) -> Result<Vec<CorpusEntry>> {
     let mut paths: Vec<PathBuf> = fs::read_dir(directory)
         .with_context(|| format!("reading corpus directory {}", directory.display()))?
         .map(|entry| entry.map(|item| item.path()))
@@ -585,7 +692,21 @@ pub fn load_corpus(directory: &Path) -> Result<Vec<Campaign>> {
     if paths.is_empty() {
         bail!("corpus directory {} contains no JSON fixtures", directory.display());
     }
-    paths.iter().map(|path| load_campaign(path)).collect()
+    paths
+        .into_iter()
+        .map(|path| {
+            let campaign = load_campaign(&path)?;
+            let provenance = load_provenance(&path)?;
+            Ok(CorpusEntry { path, campaign, provenance })
+        })
+        .collect()
+}
+
+pub fn load_corpus(directory: &Path) -> Result<Vec<Campaign>> {
+    Ok(load_corpus_entries(directory)?
+        .into_iter()
+        .map(|entry| entry.campaign)
+        .collect())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1149,6 +1270,56 @@ mod tests {
             .expect_err("empty corpus must be rejected")
             .to_string()
             .contains("at least one"));
+    }
+
+    #[test]
+    fn provenance_parses_required_and_optional_fields() {
+        let contents = "\
+# why this seed exists
+scenario: gate-threshold-boundary
+reason: reproduces the off-by-one at the 75 threshold
+issue: #1460
+";
+        let provenance = parse_provenance(contents).expect("provenance should parse");
+        assert_eq!(provenance.scenario, "gate-threshold-boundary");
+        assert_eq!(provenance.reason, "reproduces the off-by-one at the 75 threshold");
+        assert_eq!(provenance.issue.as_deref(), Some("#1460"));
+    }
+
+    #[test]
+    fn provenance_requires_scenario_and_reason() {
+        let missing_reason = "scenario: only-scenario\n";
+        assert!(parse_provenance(missing_reason)
+            .expect_err("missing reason must fail")
+            .to_string()
+            .contains("reason"));
+
+        let missing_scenario = "reason: only-reason\n";
+        assert!(parse_provenance(missing_scenario)
+            .expect_err("missing scenario must fail")
+            .to_string()
+            .contains("scenario"));
+    }
+
+    #[test]
+    fn provenance_rejects_unknown_and_duplicate_keys() {
+        let unknown = "scenario: s\nreason: r\nbogus: x\n";
+        assert!(parse_provenance(unknown)
+            .expect_err("unknown key must fail")
+            .to_string()
+            .contains("unknown key"));
+
+        let duplicate = "scenario: s\nscenario: t\nreason: r\n";
+        assert!(parse_provenance(duplicate)
+            .expect_err("duplicate key must fail")
+            .to_string()
+            .contains("repeats key"));
+    }
+
+    #[test]
+    fn provenance_path_appends_suffix() {
+        let seed = Path::new("corpus/seed-0001.json");
+        assert_eq!(provenance_path(seed), PathBuf::from("corpus/seed-0001.json.provenance"));
     }
 
     #[test]

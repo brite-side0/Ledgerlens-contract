@@ -8,6 +8,45 @@ The Nix inputs still require a committed `flake.lock` to freeze nixpkgs and
 rust-overlay revisions; generate and review that lockfile when Nix is available
 before treating shell package versions as immutable.
 
+## Pinned tool versions: single source of truth
+
+Every pinned toolchain or tool version (Rust, Stellar CLI, `cargo-audit`,
+`cargo-deny`, and any future pinned tool) has exactly one authoritative
+location. All other references must either read from that location or be
+validated against it; they must never restate a version independently.
+
+| Tool | Source of truth | Dependent locations |
+| --- | --- | --- |
+| Rust channel | `rust-toolchain.toml` | `toolchain-versions.json` (`rust`), devcontainer, Nix shell, workflows |
+| Stellar CLI | `toolchain-versions.json` (`stellar_cli`) | devcontainer, Nix shell, workflows, deployment manifests |
+| `cargo-audit` | `toolchain-versions.json` (`cargo_audit`) | devcontainer, Nix shell, workflows |
+| `cargo-deny` | `toolchain-versions.json` (`cargo_deny`) | devcontainer, Nix shell, workflows |
+
+`toolchain-versions.json` is the shared manifest consumed by
+`.github/actions/tool-versions`, the devcontainer, and the Nix shell;
+`rust-toolchain.toml` remains authoritative for the Rust channel itself and is
+mirrored into the manifest. `scripts/export-tool-versions.py` emits the
+manifest for consumers that cannot read JSON directly.
+
+### Adding a new pinned-version reference
+
+1. Add or update the version in its source of truth (`toolchain-versions.json`,
+   or `rust-toolchain.toml` for the Rust channel).
+2. Make every consumer read from that source (via the
+   `.github/actions/tool-versions` action, the devcontainer, or the Nix shell)
+   instead of hardcoding a version string.
+3. If a location genuinely cannot read the source, add it to the drift check
+   so it is validated against the source of truth.
+4. Run the toolchain drift check locally before opening a PR.
+
+### CI drift check
+
+The toolchain drift check (see the toolchain-drift-alert documentation and
+`.github/actions/tool-versions`) fails when any dependent location diverges
+from its source of truth, including a seeded drift introduced in a workflow,
+script, or documentation reference. This enforces the convention above for
+future contributors (see issue #1461).
+
 ## Start
 
 - VS Code Dev Containers: open the repository in WSL2 or Docker Desktop and run

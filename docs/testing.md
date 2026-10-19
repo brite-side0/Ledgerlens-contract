@@ -88,6 +88,59 @@ Nextest does not run doctests. The `Doctests and benches` CI job runs
 executes each Criterion benchmark once in test mode so benches keep compiling
 and running. Full benchmark measurements run nightly in `nightly-tests.yml`.
 
+## Workspace member → CI job coverage
+
+Every member listed in the workspace `Cargo.toml` must have its tests executed
+by at least one required CI job (issue #1459). The table below is the
+authoritative mapping; it is verified by the structural check described in the
+next section, which fails CI when a member is added without a verified
+execution path.
+
+| Workspace member | Kind | CI job(s) that run its tests |
+|---|---|---|
+| `ledgerlens-score` | contract | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `ledgerlens-registry` | contract | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `ledgerlens-governance` | contract | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `reference-provider` | example contract | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `mock-amm` | mock contract | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `mock-lending` | mock contract | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `examples/*` (each example crate) | example | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `tools/*` (each tool crate) | tool | `Unit tests` (partitioned nextest), `Doctests and benches` |
+| `tests/*` (integration test crates) | test | `Unit tests` (partitioned nextest), `Doctests and benches` |
+
+Notes:
+
+- The `Unit tests` job runs `cargo nextest run --workspace`, so every member
+  with at least one test binary is covered by the partitioned run. The
+  partitioning step assigns every listed test to exactly one shard, so no
+  member's tests are dropped.
+- The `Doctests and benches` job runs `cargo test --workspace --doc` and
+  `cargo test --workspace --benches`, covering doctests and bench-mode tests
+  that nextest does not execute.
+- When you add a member, add a row here **and** ensure it is picked up by the
+  workspace-wide jobs above (or add an explicit job and register it in the
+  check's allow-list).
+
+## Structural check: workspace members must have a CI execution path
+
+`tools/ci/check_workspace_ci_coverage.py` (run by the `Workspace CI coverage`
+job in `.github/workflows/ci.yml`) enforces the invariant:
+
+1. It reads the workspace members from `Cargo.toml` (including globs such as
+   `examples/*` and `tools/*`, expanded on disk).
+2. It parses `.github/workflows/ci.yml` and collects the set of members whose
+   tests are actually executed — either via a workspace-wide command
+   (`--workspace`) or an explicit `-p <member>` / `--package <member>` in a
+   required job.
+3. It cross-references the committed table above (`docs/testing.md`) to ensure
+   every member has a documented job mapping.
+4. It **fails** if any workspace member has no verified execution path, or if a
+   row in the table references a member that no longer exists.
+
+This makes the gap impossible to reintroduce silently: adding a crate to the
+workspace without wiring its tests into a required CI job (and documenting it
+here) turns the `Workspace CI coverage` job red.
+
 ## Measured impact
 
 Baseline (`cargo test --workspace` single job on `main`, last three runs

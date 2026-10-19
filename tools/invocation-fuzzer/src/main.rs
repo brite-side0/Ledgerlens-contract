@@ -2,7 +2,8 @@
 
 use anyhow::{bail, Context, Result};
 use invocation_fuzzer::{
-    load_campaign, load_corpus, replay_campaign, run_fuzz_with_abi, DEFAULT_CASES, MAX_CASES,
+    audit_corpus, load_campaign, load_corpus, replay_campaign, run_fuzz_with_abi, DEFAULT_CASES,
+    MAX_CASES,
 };
 use std::env;
 use std::path::{Path, PathBuf};
@@ -11,10 +12,13 @@ fn usage() -> &'static str {
     "Usage:
     cargo run -p invocation-fuzzer --locked -- smoke [--seed N] [--cases N] [--corpus-dir PATH] [--abi-schema PATH]
   cargo run -p invocation-fuzzer --locked -- replay PATH
+  cargo run -p invocation-fuzzer --locked -- corpus-audit [--corpus-dir PATH] [--require-provenance]
 
 smoke replays every regression fixture before running a bounded deterministic
 corpus-guided campaign. replay executes the selected fixture twice and rejects
-any observable mismatch."
+any observable mismatch. corpus-audit prints each committed seed's provenance
+note and, with --require-provenance, fails when a seed lacks one (see issue
+#1460)."
 }
 
 fn parse_number<T>(value: Option<String>, flag: &str) -> Result<T>
@@ -77,6 +81,44 @@ fn smoke(mut args: impl Iterator<Item = String>) -> Result<()> {
     Ok(())
 }
 
+fn corpus_audit(mut args: impl Iterator<Item = String>) -> Result<()> {
+    let mut corpus_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let mut require_provenance = false;
+
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--corpus-dir" => {
+                corpus_dir = PathBuf::from(args.next().context("missing value for --corpus-dir")?)
+            }
+            "--require-provenance" => require_provenance = true,
+            _ => bail!("unknown corpus-audit option {flag}\n\n{}", usage()),
+        }
+    }
+
+    let report = audit_corpus(&corpus_dir)?;
+    for entry in &report.entries {
+        match &entry.provenance {
+            Some(note) => println!("OK   {}: {}", entry.name, note),
+            None => println!("MISS {}: <no provenance note>", entry.name),
+        }
+    }
+    println!(
+        "corpus-audit seeds={} documented={} undocumented={}",
+        report.entries.len(),
+        report.documented,
+        report.undocumented
+    );
+
+    if require_provenance && report.undocumented > 0 {
+        bail!(
+            "{} corpus seed(s) lack a provenance note; every new seed must carry a \
+             co-located note explaining why it was added (issue #1460)",
+            report.undocumented
+        );
+    }
+    Ok(())
+}
+
 fn replay(path: &Path) -> Result<()> {
     let campaign = load_campaign(path)?;
     let report = replay_campaign(&campaign)?;
@@ -96,6 +138,7 @@ fn main() -> Result<()> {
             }
             replay(Path::new(&path))
         }
+        Some("corpus-audit") => corpus_audit(args),
         Some("-h" | "--help") => {
             println!("{}", usage());
             Ok(())

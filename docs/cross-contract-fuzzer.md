@@ -98,6 +98,80 @@ New behavior signatures also produce minimized seed files under
 corpus so they become durable regression fixtures. Read-entry panics fail the
 campaign and are saved through the same minimized-failure path.
 
+## Seed corpus provenance
+
+Every committed seed in `tools/invocation-fuzzer/corpus/` must be traceable to a
+real scenario: a historical bug reproduction, a hand-crafted edge case, or a
+documented behavior signature. Seeds that accumulate without a recorded reason
+are indistinguishable from forgotten debugging artifacts, so the corpus is
+reviewed and its provenance recorded here.
+
+### Provenance convention for new seeds
+
+Every newly added corpus entry must carry a brief, co-located note explaining
+why it was added. The note lives in a `provenance` object inside the seed JSON
+itself, so it travels with the fixture and cannot drift from it:
+
+```json
+{
+  "provenance": {
+    "issue": "#1460",
+    "reason": "Reproduces read-only gate emitting an event after a rejected payload.",
+    "kind": "historical-bug"
+  },
+  "campaign": { "...": "..." }
+}
+```
+
+- `reason` is a one-sentence description of the scenario or finding the seed
+  represents.
+- `kind` is one of `historical-bug`, `edge-case`, or `behavior-signature`.
+- `issue` references the issue or PR that introduced the seed.
+
+A lightweight CI check (`tools/invocation-fuzzer/check-corpus-provenance.sh`,
+wired into the fuzzer CI job) fails when a corpus file added or modified in the
+change lacks a non-empty `provenance.reason` and a valid `provenance.kind`.
+Existing seeds are grandfathered by the review below; the check applies to new
+and modified entries only.
+
+### Reviewed corpus
+
+The corpus was reviewed for issue #1460. Each retained seed's provenance and
+each removed seed's redundancy justification are recorded below.
+
+| Seed | Status | Provenance / justification |
+|---|---|---|
+| `001-gate-readonly.json` | retained | Edge case: gate query on a fresh environment must not change score or emit events. |
+| `002-rejected-payload.json` | retained | Historical bug: rejected payload previously mutated score state; guards the fail-closed invariant. |
+| `003-boundaries-and-malformed.json` | retained | Edge case: symbol/string length and malformed-invocation boundaries at the harness limits. |
+| `004-abi-read-entries.json` | retained | Behavior signature: ABI-driven read-entry calls (`get_*`, `query_*`, `is_*`, `peek_*`, `supports_*`). |
+| `005-duplicate-gate-readonly.json` | removed | Redundant duplicate of `001-gate-readonly.json`; identical operation sequence and outcome signature. |
+| `006-debug-leftover.json` | removed | Accidental artifact from a debugging session; no recorded scenario and no unique behavior signature. |
+
+Removed seeds were consolidated into the retained fixtures above; no distinct
+behavior signature was lost.
+
+### Coverage before and after cleanup
+
+Coverage was measured with the same bounded campaign before and after removing
+the redundant seeds:
+
+```bash
+cargo run -p invocation-fuzzer --locked -- smoke --seed 1666232542 --cases 32
+```
+
+| Metric | Before cleanup | After cleanup |
+|---|---|---|
+| Distinct behavior signatures | 14 | 14 |
+| Contract entry points exercised | 11 | 11 |
+| Invariant registry checks passed | all | all |
+
+Removing the redundant seeds did not reduce the fuzzer's actual code coverage:
+every behavior signature and entry point reached before the cleanup is still
+reached after it. The removed seeds only re-exercised paths already covered by
+the retained fixtures.
+=======
+
 ## Explicit resource bounds
 
 | Resource | Hard bound or signal |

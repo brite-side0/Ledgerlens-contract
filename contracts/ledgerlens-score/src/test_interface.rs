@@ -14,6 +14,7 @@ use soroban_sdk::{
 };
 
 use crate::{
+    capability_probe::{probe_all, probe_for, ProbeOutcome},
     constants::CONTRACT_VERSION, Error, LedgerLensScoreContract, LedgerLensScoreContractClient,
     RiskScore,
 };
@@ -212,6 +213,117 @@ fn test_supports_interface_cons() {
 fn test_supports_interface_pr_rd() {
     let (_env, client, _admin, _service) = setup();
     assert!(client.supports_interface(&symbol_short!("pr_rd")));
+}
+
+// ── capability drift diagnostic registry (issue #1458) ────────────────────────
+
+#[test]
+fn test_capability_probe_registry_covers_every_advertised_token() {
+    // Structural test: every capability token the contract advertises via
+    // `get_interface_metadata` (and therefore answers `true` for in
+    // `supports_interface`) must have an entry in the probe registry — either a
+    // safe probe or an explicit, documented exemption. Adding a new capability
+    // token without updating `capability_probe` fails here.
+    let (env, client, _admin, _service) = setup();
+    let metadata = client.get_interface_metadata();
+
+    for capability in metadata.capabilities.iter() {
+        assert!(
+            client.supports_interface(&capability),
+            "metadata advertises `{capability:?}` but supports_interface denies it"
+        );
+        assert!(
+            probe_for(&env, &capability).is_some(),
+            "capability `{capability:?}` has no probe or documented exemption in the \
+             capability_probe registry (see issue #1458)"
+        );
+    }
+}
+
+#[test]
+fn test_capability_probe_registry_has_no_stale_entries() {
+    // The registry must not drift in the other direction either: an entry for a
+    // token the contract no longer advertises is dead weight and hides rot.
+    let (env, client, _admin, _service) = setup();
+    let metadata = client.get_interface_metadata();
+
+    for capability in crate::capability_probe::registered_capabilities(&env).iter() {
+        let mut advertised = false;
+        for cap in metadata.capabilities.iter() {
+            if cap == capability {
+                advertised = true;
+                break;
+            }
+        }
+        assert!(
+            advertised,
+            "capability_probe registry lists `{capability:?}` but the contract no longer \
+             advertises it (see issue #1458)"
+        );
+    }
+}
+
+#[test]
+fn test_capability_probe_registry_entries_are_probe_or_exemption() {
+    // Every registry entry must be self-describing: either a probe that can be
+    // executed, or an exemption carrying a non-empty documented reason.
+    let (env, _client, _admin, _service) = setup();
+
+    for capability in crate::capability_probe::registered_capabilities(&env).iter() {
+        let entry = probe_for(&env, &capability).expect("registered capability must resolve");
+        match entry {
+            crate::capability_probe::CapabilityProbe::Probe(_) => {}
+            crate::capability_probe::CapabilityProbe::Exempt(reason) => {
+                assert!(
+                    !reason.is_empty(),
+                    "capability `{capability:?}` is exempted without a documented reason"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_capability_diagnostic_clean_on_fresh_deployment() {
+    // A freshly initialized contract must report no drift: every advertised
+    // capability's probe agrees with the claim.
+    let (_env, client, _admin, _service) = setup();
+    let report = probe_all(&client);
+    assert!(
+        report.is_clean(),
+        "fresh deployment reported capability drift: {:?}",
+        report.mismatches
+    );
+}
+
+#[test]
+fn test_capability_diagnostic_detects_seeded_drift() {
+    // Simulate a deployment-time feature-flag mistake: the contract advertises
+    // a capability whose probe observes behavior inconsistent with the claim.
+    // We inject a deliberately wrong expectation for the `gate` capability and
+    // assert the diagnostic flags exactly that mismatch.
+    let (env, client, _admin, _service) = setup();
+
+    let report = crate::capability_probe::probe_all_with_override(
+        &client,
+        Some((symbol_short!("gate"), ProbeOutcome::Unexpected)),
+    );
+
+    assert!(
+        !report.is_clean(),
+        "diagnostic failed to detect a seeded capability drift"
+    );
+    let mut saw_gate = false;
+    for mismatch in report.mismatches.iter() {
+        if mismatch.capability == symbol_short!("gate") {
+            saw_gate = true;
+        }
+    }
+    assert!(
+        saw_gate,
+        "diagnostic did not attribute the drift to the `gate` capability"
+    );
+    let _ = env;
 }
 
 #[test]

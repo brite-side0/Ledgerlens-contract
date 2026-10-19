@@ -262,6 +262,184 @@ mod test_dos_read_patterns;
 #[cfg(test)]
 mod test_ledger_time_extremes;
 
+#[cfg(test)]
+mod test_capability_drift;
+
+/// Read-only capability-drift probe registry (issue #1458).
+///
+/// `supports_interface` advertises a capability set, but nothing independently
+/// verifies that a live deployment's answers still match the entry points the
+/// deployed binary actually exposes. This module is the single source of truth
+/// for how each advertised capability token is probed, or why it cannot be.
+///
+/// Every token returned by `supports_interface` / `get_interface_metadata` must
+/// appear here with either a [`ProbeKind::ReadOnly`] probe or an explicit
+/// [`ProbeKind::Exempt`] reason. The structural test in
+/// `test_capability_drift.rs` fails when a new token is added without one.
+///
+/// The registry is exposed off-contract via [`capability_probe_registry`] so
+/// deployment tooling (`scripts/verify-deployment.sh`) can drive the same
+/// probe set the contract tests enforce.
+pub mod capability_probes {
+    use soroban_sdk::{Env, Symbol, Vec};
+
+    /// How a capability token is verified against a live instance.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum ProbeKind {
+        /// A minimal, safe, read-only call that exercises the capability.
+        /// The `entry_point` names the contract function invoked; the probe
+        /// must not mutate state, emit events, or require authorization.
+        ReadOnly { entry_point: &'static str },
+        /// The capability cannot be probed without a side effect or an
+        /// authorization requirement. `reason` documents why, so the
+        /// limitation is explicit rather than silently skipped.
+        Exempt { reason: &'static str },
+    }
+
+    /// One registry row: the capability token plus how it is verified.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct CapabilityProbe {
+        pub token: &'static str,
+        pub kind: ProbeKind,
+    }
+
+    /// The complete probe registry. Must stay in lock-step with
+    /// `supports_interface`; enforced by `test_capability_drift`.
+    pub const PROBE_REGISTRY: &[CapabilityProbe] = &[
+        CapabilityProbe {
+            token: "score",
+            kind: ProbeKind::ReadOnly { entry_point: "get_score" },
+        },
+        CapabilityProbe {
+            token: "history",
+            kind: ProbeKind::ReadOnly { entry_point: "get_score_history" },
+        },
+        CapabilityProbe {
+            token: "hpag",
+            kind: ProbeKind::ReadOnly { entry_point: "get_score_history_paginated" },
+        },
+        CapabilityProbe {
+            token: "batch",
+            kind: ProbeKind::ReadOnly { entry_point: "get_batch_result" },
+        },
+        CapabilityProbe {
+            token: "gate",
+            kind: ProbeKind::ReadOnly { entry_point: "query_risk_gate" },
+        },
+        CapabilityProbe {
+            token: "aggr",
+            kind: ProbeKind::ReadOnly { entry_point: "get_aggregate_score" },
+        },
+        CapabilityProbe {
+            token: "count",
+            kind: ProbeKind::ReadOnly { entry_point: "get_score_count" },
+        },
+        CapabilityProbe {
+            token: "var",
+            kind: ProbeKind::ReadOnly { entry_point: "get_score_volatility" },
+        },
+        CapabilityProbe {
+            token: "batch_attested",
+            kind: ProbeKind::ReadOnly { entry_point: "get_batch_attestation" },
+        },
+        CapabilityProbe {
+            token: "cgate",
+            kind: ProbeKind::ReadOnly { entry_point: "query_risk_gate_with_confidence" },
+        },
+        CapabilityProbe {
+            token: "histogram",
+            kind: ProbeKind::ReadOnly { entry_point: "get_score_histogram" },
+        },
+        CapabilityProbe {
+            token: "rgate",
+            kind: ProbeKind::ReadOnly { entry_point: "query_risk_gate_relative" },
+        },
+        CapabilityProbe {
+            token: "emb",
+            kind: ProbeKind::ReadOnly { entry_point: "is_score_embargoed" },
+        },
+        CapabilityProbe {
+            token: "cons",
+            kind: ProbeKind::ReadOnly { entry_point: "get_consensus_config" },
+        },
+        CapabilityProbe {
+            token: "pr_rd",
+            kind: ProbeKind::ReadOnly { entry_point: "is_pair_paused" },
+        },
+        CapabilityProbe {
+            token: "dprv",
+            kind: ProbeKind::ReadOnly { entry_point: "get_score_delegate" },
+        },
+        CapabilityProbe {
+            token: "meta",
+            kind: ProbeKind::ReadOnly { entry_point: "get_interface_metadata" },
+        },
+        CapabilityProbe {
+            token: "reconcile",
+            kind: ProbeKind::Exempt {
+                reason: "reconcile_state requires admin authorization and emits a \
+                         ReconciliationReport event; probing it would mutate the audit \
+                         trail. Verified indirectly via `checksum`.",
+            },
+        },
+        CapabilityProbe {
+            token: "checksum",
+            kind: ProbeKind::ReadOnly { entry_point: "get_state_snapshot_count" },
+        },
+        CapabilityProbe {
+            token: "snapshot",
+            kind: ProbeKind::ReadOnly { entry_point: "get_snapshot_history" },
+        },
+        CapabilityProbe {
+            token: "export_score",
+            kind: ProbeKind::ReadOnly { entry_point: "export_score" },
+        },
+        CapabilityProbe {
+            token: "freeze",
+            kind: ProbeKind::ReadOnly { entry_point: "is_frozen" },
+        },
+        CapabilityProbe {
+            token: "arch",
+            kind: ProbeKind::ReadOnly { entry_point: "get_arch_owner" },
+        },
+        CapabilityProbe {
+            token: "score_hooks",
+            kind: ProbeKind::Exempt {
+                reason: "score hooks are registered via an admin-authorized setter and \
+                         have no read-only accessor; probing would require a state \
+                         mutation. Verified indirectly via `meta`.",
+            },
+        },
+    ];
+
+    /// Returns the probe registry as a Soroban `Vec` so off-contract tooling
+    /// can consume it through the contract ABI.
+    pub fn registry_vec(env: &Env) -> Vec<(Symbol, Symbol)> {
+        let mut out = Vec::new(env);
+        for probe in PROBE_REGISTRY {
+            let token = Symbol::new(env, probe.token);
+            let detail = match probe.kind {
+                ProbeKind::ReadOnly { entry_point } => Symbol::new(env, entry_point),
+                ProbeKind::Exempt { .. } => Symbol::new(env, "exempt"),
+            };
+            out.push_back((token, detail));
+        }
+        out
+    }
+
+    /// Looks up the registry row for `token`, if any.
+    pub fn lookup(token: &str) -> Option<&'static CapabilityProbe> {
+        PROBE_REGISTRY.iter().find(|p| p.token == token)
+    }
+}
+
+/// Returns the capability-probe registry for off-contract deployment tooling
+/// (issue #1458). Each entry maps an advertised capability token to either the
+/// read-only entry point that probes it or an explicit exemption marker.
+pub fn capability_probe_registry(env: Env) -> Vec<(Symbol, Symbol)> {
+    capability_probes::registry_vec(&env)
+}
+
 use soroban_sdk::{
     contract, contractimpl, crypto::Hash, symbol_short, token, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, SymbolStr, TryFromVal, Vec,
@@ -5740,6 +5918,13 @@ impl LedgerLensScoreContract {
     /// macro used for the shorter entries. The equality check is bytewise
     /// — both sides go through Soroban's normal Symbol serialization — so
     /// callers can pass either form.
+    /// Returns the capability-probe registry (issue #1458) so off-contract
+    /// deployment verification tooling can drive the same probe set that the
+    /// structural test enforces.
+    pub fn get_capability_probe_registry(env: Env) -> Vec<(Symbol, Symbol)> {
+        capability_probes::registry_vec(&env)
+    }
+
     pub fn supports_interface(env: Env, capability: Symbol) -> bool {
         capability == symbol_short!("score")
             || capability == symbol_short!("history")

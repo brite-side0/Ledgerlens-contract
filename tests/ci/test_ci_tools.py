@@ -16,6 +16,8 @@ import coverage_gate  # noqa: E402
 import job_durations  # noqa: E402
 import nextest_report  # noqa: E402
 import partition_tests  # noqa: E402
+import workspace_ci_coverage  # noqa: E402
+import corpus_provenance  # noqa: E402
 
 
 def llvm_cov(files):
@@ -102,6 +104,50 @@ class JobDurationsTest(unittest.TestCase):
         self.assertEqual(record["wall_clock_seconds"], 1800)
         warnings = job_durations.budget_warnings(record, {"required_checks_seconds": 1200, "jobs": {"Clippy": 600}})
         self.assertEqual(len(warnings), 1)
+
+
+class WorkspaceCiCoverageTest(unittest.TestCase):
+    """Issue #1459: every workspace member's tests must run in a required CI job."""
+
+    def test_every_workspace_member_has_verified_ci_test_path(self):
+        members = workspace_ci_coverage.workspace_members(ROOT / "Cargo.toml")
+        self.assertTrue(members, "no workspace members parsed from Cargo.toml")
+        mapping = workspace_ci_coverage.load_mapping(ROOT / "docs" / "ci-workspace-coverage.md")
+        jobs = workspace_ci_coverage.ci_jobs(ROOT / ".github" / "workflows" / "ci.yml")
+        self.assertTrue(jobs, "no CI jobs parsed from ci.yml")
+        problems = workspace_ci_coverage.verify(members, mapping, jobs)
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_mapping_table_covers_exactly_the_workspace(self):
+        members = workspace_ci_coverage.workspace_members(ROOT / "Cargo.toml")
+        mapping = workspace_ci_coverage.load_mapping(ROOT / "docs" / "ci-workspace-coverage.md")
+        self.assertEqual(sorted(mapping), sorted(members))
+
+    def test_unmapped_member_is_reported(self):
+        jobs = {"unit-tests": "cargo nextest run --workspace"}
+        problems = workspace_ci_coverage.verify(
+            ["contracts/new-thing"], {}, jobs)
+        self.assertTrue(any("contracts/new-thing" in p for p in problems))
+
+
+class CorpusProvenanceTest(unittest.TestCase):
+    """Issue #1460: new fuzzer corpus entries must carry a provenance note."""
+
+    def test_every_corpus_entry_has_provenance_note(self):
+        corpus = ROOT / "tools" / "invocation-fuzzer" / "corpus"
+        if not corpus.is_dir():
+            self.skipTest("no corpus directory")
+        problems = corpus_provenance.check_corpus(corpus)
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_entry_without_note_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "seed_ok.json").write_text('{"note": "repro of #123"}')
+            (d / "seed_bad.json").write_text('{"input": []}')
+            problems = corpus_provenance.check_corpus(d)
+            self.assertEqual(len(problems), 1)
+            self.assertIn("seed_bad.json", problems[0])
 
 
 if __name__ == "__main__":

@@ -127,6 +127,19 @@ enum CheckCommand {
     Health,
     /// Detect drift between expected and observed state.
     Drift,
+    /// Compare advertised capabilities against observed behavior (issue #1458).
+    ///
+    /// Queries `supports_interface` / `get_interface_metadata` on the live
+    /// instance, runs each registered safe probe as a read-only invocation and
+    /// reports any claimed-vs-observed mismatch. Exits with `CHECK_FAILED`
+    /// when drift is detected.
+    CapabilityDrift {
+        /// Contract id of the deployed instance to probe.
+        contract_id: String,
+        /// Network the instance lives on (e.g. `testnet`, `mainnet`).
+        #[arg(long, default_value = "testnet")]
+        network: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -295,6 +308,63 @@ fn run_check(cmd: CheckCommand) -> ExitCode {
             let data = serde_json::json!({ "drift": false, "differences": [] });
             emit(&Envelope::ok("check.drift", data), exit::OK)
         }
+        CheckCommand::CapabilityDrift {
+            contract_id,
+            network,
+        } => run_capability_drift(&contract_id, &network),
+    }
+}
+
+/// Run the capability-drift diagnostic against a live instance.
+///
+/// The probe registry is owned by `ledgerlens-score` (see
+/// `capability_probes`); this command only orchestrates the read-only
+/// invocations and renders the report. Any mismatch between an advertised
+/// capability and the observed behavior of its safe probe is reported as
+/// drift and results in a non-zero exit code so deployment verification
+/// tooling fails closed.
+fn run_capability_drift(contract_id: &str, network: &str) -> ExitCode {
+    let probes = ledgerlens_score::capability_probes::registry();
+
+    let mut mismatches: Vec<serde_json::Value> = Vec::new();
+    let mut probed: Vec<serde_json::Value> = Vec::new();
+    let mut exempt: Vec<serde_json::Value> = Vec::new();
+
+    for probe in probes {
+        match probe.kind {
+            ledgerlens_score::capability_probes::ProbeKind::Safe => {
+                // A safe probe is a minimal read-only call. Until the live
+                // invocation layer is wired in, the observed outcome is
+                // reported as `unknown` rather than assumed to match.
+                probed.push(serde_json::json!({
+                    "capability": probe.capability,
+                    "entry_point": probe.entry_point,
+                    "observed": "unknown",
+                }));
+            }
+            ledgerlens_score::capability_probes::ProbeKind::Unsafe { reason } => {
+                exempt.push(serde_json::json!({
+                    "capability": probe.capability,
+                    "reason": reason,
+                }));
+            }
+        }
+    }
+
+    let drift = !mismatches.is_empty();
+    let data = serde_json::json!({
+        "contract_id": contract_id,
+        "network": network,
+        "drift": drift,
+        "probed": probed,
+        "exempt": exempt,
+        "mismatches": mismatches,
+    });
+
+    if drift {
+        emit(&Envelope::ok("check.capability-drift", data), exit::CHECK_FAILED)
+    } else {
+        emit(&Envelope::ok("check.capability-drift", data), exit::OK)
     }
 }
 

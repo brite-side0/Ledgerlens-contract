@@ -56,6 +56,27 @@ jobs:
               - 'spec/**'
               - '.github/workflows/ci.yml'
 
+  # ── Toolchain pin consistency (#1461) ───────────────────────────────────────
+  #
+  # `toolchain-versions.json` is the single source of truth for every pinned
+  # toolchain/tool version (Rust, Stellar CLI, cargo-audit, cargo-deny, ...).
+  # The `tool-versions` composite action reads it, and this job fails when any
+  # dependent location — workflow steps, scripts or docs — drifts from it.
+  # See docs/development-environment.md for the convention.
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  toolchain-pins:
+    name: Toolchain pin consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
+      - name: Prove the drift checker still detects a seeded drift
+        run: python3 tools/check_toolchain_pins.py --self-test
+      - name: Check every pinned-version reference matches the source of truth
+        run: python3 tools/check_toolchain_pins.py
+
   fmt:
     name: Format check
     needs: changes
@@ -63,9 +84,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
@@ -81,9 +104,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -105,9 +130,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
@@ -141,6 +168,49 @@ jobs:
   # all-zero `before` SHA on a branch's first push means "no base", in which
   # case the review diff is skipped rather than faked.
   # ─────────────────────────────────────────────────────────────────────────────
+
+  # ── Workspace test coverage gate (#1459) ────────────────────────────────────
+  #
+  # Every workspace member (contract crate, example, mock) must have its tests
+  # executed by at least one required CI job. `docs/workspace-ci-coverage.md`
+  # is the committed table mapping each member to the job that runs it, and
+  # `tools/check_workspace_ci_coverage.py` fails when a member is added to the
+  # workspace without a verified CI execution path. The `workspace-tests` job
+  # below is the catch-all that actually runs every member's test suite, so a
+  # newly added member is executed even before its row is documented.
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  workspace-coverage:
+    name: Workspace CI coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove the coverage checker still detects an undocumented member
+        run: python3 tools/check_workspace_ci_coverage.py --self-test
+      - name: Check every workspace member has a CI test-execution path
+        run: python3 tools/check_workspace_ci_coverage.py
+
+  workspace-tests:
+    name: Workspace member tests
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.81.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only trusted pushes to main write caches; PRs (including forks)
+          # restore only, so they can never poison a cache main will read.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Runs the test suite of every workspace member — contract crates,
+      # examples and mocks alike — so no member's tests can be silently
+      # unverified. This is additive to the tiered jobs above, which cover the
+      # main contract's units; it does not narrow any of them.
+      - name: Run tests for every workspace member
+        run: cargo test --workspace --all-targets --locked
 
   test-tiers-manifest:
     name: Test tier manifest
@@ -178,9 +248,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
       - uses: Swatinem/rust-cache@v2
       - name: Resolve base revision for the tier-move review
         id: base
@@ -216,9 +288,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
       - uses: Swatinem/rust-cache@v2
       - name: Resolve base revision for the tier-move review
         id: base
@@ -281,9 +355,11 @@ jobs:
       WASM_PROFILE: ${{ matrix.profile }}
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Build profile WASM
@@ -320,9 +396,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
@@ -379,9 +457,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
@@ -439,9 +519,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Build release WASM (build A)
@@ -487,19 +569,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
           # cargo-audit 0.22 requires Rust 1.88+ and understands the CVSS 4.0
           # records now present in the live RustSec advisory database. This job
           # only inspects Cargo.lock; contract builds remain pinned to Rust 1.81.
-          toolchain: "1.88.0"
+          # Version comes from toolchain-versions.json (single source of truth).
+          toolchain: ${{ steps.tool-versions.outputs.audit-rust }}
       - uses: Swatinem/rust-cache@v2
         with:
           # Only trusted pushes to main write caches; PRs (including forks)
           # restore only, so they can never poison a cache main will read.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-audit
-        run: cargo +1.88.0 install cargo-audit --version 0.22.2 --locked
+        run: cargo +${{ steps.tool-versions.outputs.audit-rust }} install cargo-audit --version ${{ steps.tool-versions.outputs.cargo-audit }} --locked
       - name: Run security audit
         # RUSTSEC-2026-0009 affects time's RFC parsing. time is only pulled in
         # through serde_with -> stellar-xdr; the contract does not invoke that
@@ -507,7 +592,7 @@ jobs:
         # be parsed by the Rust 1.81 toolchain required for deployable Soroban
         # WASM. Keep this exception narrow and remove it when Soroban permits a
         # newer release toolchain.
-        run: cargo +1.88.0 audit --ignore RUSTSEC-2026-0009
+        run: cargo +${{ steps.tool-versions.outputs.audit-rust }} audit --ignore RUSTSEC-2026-0009
 
   # ── Dependency license / policy gate ────────────────────────────────────────
   #
@@ -533,16 +618,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88.0"
+          toolchain: ${{ steps.tool-versions.outputs.audit-rust }}
       - uses: Swatinem/rust-cache@v2
         with:
           # Only trusted pushes to main write caches; PRs (including forks)
           # restore only, so they can never poison a cache main will read.
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install cargo-deny
-        run: cargo +1.88.0 install cargo-deny --version 0.20.2 --locked
+        run: cargo +${{ steps.tool-versions.outputs.audit-rust }} install cargo-deny --version ${{ steps.tool-versions.outputs.cargo-deny }} --locked
       - name: Run cargo-deny checks (licenses, bans, advisories, sources)
         run: cargo-deny check
 
@@ -576,9 +663,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
+
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master (2026-08-05)
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           targets: wasm32-unknown-unknown
 
       # ── Step 1: Verify the active toolchain matches rust-toolchain.toml ──────
@@ -673,7 +763,7 @@ jobs:
       # introduce non-determinism; the byte-for-byte WASM comparison remains
       # clean on its own.
       - name: Install cargo-cyclonedx
-        run: cargo +1.81.0 install cargo-cyclonedx --version 0.5.8 --locked
+        run: cargo +${{ steps.tool-versions.outputs.contract-rust }} install cargo-cyclonedx --version ${{ steps.tool-versions.outputs.cargo-cyclonedx }} --locked
 
       - name: Generate & validate CycloneDX SBOM (wasm32 target)
         run: tools/generate_sbom.sh
@@ -712,9 +802,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           targets: wasm32-unknown-unknown
       # Deliberately no Swatinem/rust-cache — each run must be a cold,
       # independent build to prove there is no cache-based non-determinism.
@@ -746,9 +838,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: tool-versions
+        uses: ./.github/actions/tool-versions
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
           targets: wasm32-unknown-unknown
       # No cache — independent cold build, same as run 1.
       - name: Assert cold build (no compiler or target cache)
@@ -834,9 +928,11 @@ jobs:
           java -XX:+UseParallelGC -jar /tmp/tla2tools.jar -simulate num=20000 -depth 30 -config LedgerLens.cfg LedgerLens.tla
 
       - name: Set up Rust for model-to-contract replay
-        uses: dtolnay/rust-toolchain@master
+        id: tool-versions
+        uses: ./.github/actions/tool-versions
+      - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.81.0"
+          toolchain: ${{ steps.tool-versions.outputs.contract-rust }}
       - uses: Swatinem/rust-cache@v2
 
       - name: Replay bounded TLC behaviors against the Rust contract
@@ -876,9 +972,12 @@ jobs:
     if: always()
     needs:
       - changes
+      - toolchain-pins
       - fmt
       - clippy
       - contract-build-lints
+      - workspace-coverage
+      - workspace-tests
       - test-tiers-manifest
       - test-tiers-fast
       - test-tiers-standard

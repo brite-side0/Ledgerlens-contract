@@ -203,6 +203,19 @@ function is total and never traps.
 > under-advertisement as a SHOULD. Tracked in
 > [`docs/standards/ledgerlens-alignment.md`](standards/ledgerlens-alignment.md) §5.
 
+> **Verifying a live deployment's claims.** `supports_interface` is only useful
+> if its answers match what the deployed binary actually does. A feature-flag or
+> build-profile mistake at deploy time can leave the advertised capability set
+> out of sync with reality, and no consumer notices until an individual call
+> unexpectedly fails. The read-only **capability drift** diagnostic probes each
+> advertised capability with a minimal, safe call and reports mismatches; it runs
+> as part of `scripts/verify-deployment.sh`. The probe set — including, for every
+> capability token, either its safe probe or a documented reason it cannot be
+> probed safely — is maintained in
+> [`docs/capability-probes.md`](capability-probes.md) and must be updated
+> whenever a new capability token is introduced (enforced by a structural test).
+> See issue #1458.
+
 ### 1.4 `get_interface_metadata` — versioned metadata discovery
 
 ```rust
@@ -570,6 +583,7 @@ reject the shard.
 ## 8. Reference material
 
 - Reference integration: [`examples/amm_gate.rs`](../examples/amm_gate.rs)
+- Capability probe set (living document): [`docs/capability-probes.md`](capability-probes.md)
 - Interface stability tests: `contracts/ledgerlens-score/src/test_interface.rs`
 - Batch Attestation spec: [`docs/batch-attestation-spec.md`](batch-attestation-spec.md)
 - Batch Attestation tests: `contracts/ledgerlens-score/src/test_batch_attestation.rs`

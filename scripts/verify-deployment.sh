@@ -168,6 +168,37 @@ check "Smoke test score is retrievable" "$SCORE"
 
 echo ""
 
+# ── 2b. Capability drift diagnostic (issue #1458) ──────
+log "2b. Capability drift diagnostic"
+# Compares the capability set advertised by supports_interface against the
+# entry points actually reachable on this deployed instance. Any mismatch
+# (advertised-but-missing or present-but-unadvertised) is a hard failure.
+DRIFT_CMD=()
+if command -v ledgerlens-cli >/dev/null 2>&1; then
+  DRIFT_CMD=(ledgerlens-cli capability-drift)
+elif [ -x "$PROJECT_ROOT/scripts/capability-drift.sh" ]; then
+  DRIFT_CMD=("$PROJECT_ROOT/scripts/capability-drift.sh")
+fi
+
+if [ "${#DRIFT_CMD[@]}" -eq 0 ]; then
+  WARN=$((WARN + 1))
+  log "  WARN: capability-drift diagnostic not available (ledgerlens-cli or scripts/capability-drift.sh missing)"
+elif [ "$DRY_RUN" = "true" ]; then
+  log "  SKIP: capability drift diagnostic (dry-run)"
+else
+  if "${DRIFT_CMD[@]}" \
+      --contract-id "$CONTRACT_ID" \
+      --network "$NETWORK" \
+      --source "$ADMIN_IDENTITY"; then
+    check "No capability drift detected" "true"
+  else
+    check "No capability drift detected" "FAIL"
+    log "  HINT: advertised capabilities disagree with the deployed binary; see diagnostic output above"
+  fi
+fi
+
+echo ""
+
 # ── 3. Pending upgrade check ───────────────────────────
 log "3. Pending upgrade check"
 PENDING_UPGRADE=$(soroban contract invoke \
